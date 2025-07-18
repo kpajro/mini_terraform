@@ -1,8 +1,8 @@
 terraform {
   required_providers {
     azurerm = {
-        source = "hashicorp/azurerm"
-        version = "=3.0.0"
+      source  = "hashicorp/azurerm"
+      version = "~> 3.105.0"
     }
   }
 }
@@ -13,15 +13,11 @@ resource "azurerm_resource_group" "rg" {
 }
 
 resource "azurerm_storage_account" "storage" {
-  name                     = "webappstatic${random_id.rand.hex}"
+  name                     = "webappstatic"
   resource_group_name      = azurerm_resource_group.rg.name
   location                 = azurerm_resource_group.rg.location
   account_tier             = "Standard"
   account_replication_type = "LRS"
-}
-
-resource "random_id" "rand" {
-  byte_length = 4
 }
 
 resource "azurerm_virtual_network" "vnet" {
@@ -31,23 +27,39 @@ resource "azurerm_virtual_network" "vnet" {
   resource_group_name = azurerm_resource_group.rg.name
 }
 
-resource "azurerm_subnet" "subnet" {
-  name                 = "webapp-subnet"
+# VM subnet
+resource "azurerm_subnet" "vm_subnet" {
+  name                 = "vm-subnet"
   resource_group_name  = azurerm_resource_group.rg.name
   virtual_network_name = azurerm_virtual_network.vnet.name
   address_prefixes     = ["10.0.1.0/24"]
+}
+
+# MySQL subnet with delegation
+resource "azurerm_subnet" "mysql_subnet" {
+  name                 = "mysql-subnet"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.2.0/24"]
 
   delegation {
     name = "mysql-delegation"
 
     service_delegation {
       name = "Microsoft.DBforMySQL/flexibleServers"
-
       actions = [
         "Microsoft.Network/virtualNetworks/subnets/action"
       ]
     }
   }
+}
+
+resource "azurerm_public_ip" "webapp_public_ip" {
+  name                = "webapp-public-ip"
+  location            = var.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+  sku                 = "Basic"
 }
 
 resource "azurerm_network_interface" "nic" {
@@ -57,31 +69,29 @@ resource "azurerm_network_interface" "nic" {
 
   ip_configuration {
     name                          = "webapp-ipcfg"
-    subnet_id                     = azurerm_subnet.subnet.id
+    subnet_id                     = azurerm_subnet.vm_subnet.id
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.webapp_public_ip.id
   }
 }
 
-resource "azurerm_public_ip" "webapp_public_ip" {
-  name                = "webapp-public-ip"
-  location            = var.location
-  resource_group_name = azurerm_resource_group.rg.name
-  allocation_method   = "Dynamic"
-}
-
 resource "azurerm_linux_virtual_machine" "webapp_vm" {
-  name                  = "webapp-vm"
-  location              = var.location
-  resource_group_name   = azurerm_resource_group.rg.name
-  size                  = "Standard_B1s"
-  admin_username        = var.admin_username
-  admin_password        = var.admin_password
+  name                            = "webapp-vm"
+  location                        = var.location
+  resource_group_name             = azurerm_resource_group.rg.name
+  size                            = "Standard_B1s"
+  admin_username                  = var.admin_username
+  admin_password                  = var.admin_password
   disable_password_authentication = false
 
   network_interface_ids = [
     azurerm_network_interface.nic.id,
   ]
+  
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = file("~/.ssh/terraform_key.pub")
+  }
 
   os_disk {
     caching              = "ReadWrite"
@@ -97,30 +107,39 @@ resource "azurerm_linux_virtual_machine" "webapp_vm" {
   }
 }
 
+data "azurerm_public_ip" "webapp_ip" {
+  name                = azurerm_public_ip.webapp_public_ip.name
+  resource_group_name = azurerm_resource_group.rg.name
+  depends_on          = [azurerm_public_ip.webapp_public_ip]
+}
+
+# Provisioner block: copies and runs Ansible
+
 resource "null_resource" "provision_app" {
-  depends_on = [azurerm_linux_virtual_machine.webapp_vm]
+  depends_on = [azurerm_linux_virtual_machine.webapp_vm, azurerm_public_ip.webapp_public_ip]
 
   connection {
-    type        = "ssh"
-    user        = var.admin_username
-    password    = var.admin_password
-    host        = azurerm_public_ip.webapp_public_ip.ip_address
-    timeout     = "2m"
+    type     = "ssh"
+    user     = var.admin_username
+    private_key = file("~/.ssh/terraform_key")
+    host     = data.azurerm_public_ip.webapp_ip.ip_address
+    timeout  = "2m"
   }
 
   provisioner "file" {
-    source      = "ansible"  # this is your local ansible folder
+    source      = "ansible"
     destination = "/home/${var.admin_username}/ansible"
   }
 
   provisioner "remote-exec" {
     inline = [
       "sudo apt update -y",
-      "sudo apt install -y nodejs npm git",
-      "sudo apt install -y software-properties-common",
-      "sudo apt install -y ansible",
+      "sudo apt install ansible sshpass -y",
       "cd /home/${var.admin_username}/ansible",
-      "ansible-playbook -i inventory playbook.yml"
+      "chmod 600 spawn.sh",
+      "chmod +x spawn.sh",
+      "./spawn.sh",
+      "ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory.ini playbook.yml"
     ]
   }
 
@@ -129,30 +148,7 @@ resource "null_resource" "provision_app" {
   }
 }
 
-resource "azurerm_mysql_flexible_server" "mysql" {
-  name                   = "webapp-mysql-${random_id.rand.hex}"
-  location               = var.location
-  resource_group_name    = azurerm_resource_group.rg.name
-  administrator_login    = var.mysql_admin_username
-  administrator_password = var.mysql_admin_password
-  sku_name               = "B_Standard_B1ms"
-  version                = "5.7"
-  zone                   = "1"
-  backup_retention_days  = 7
-  delegated_subnet_id = azurerm_subnet.subnet.id
-  private_dns_zone_id = null
-
-  depends_on = [azurerm_subnet.subnet]
-}
-
-resource "azurerm_mysql_flexible_database" "chatdb" {
-  name                = "chatdb"
-  resource_group_name = azurerm_resource_group.rg.name
-  server_name         = azurerm_mysql_flexible_server.mysql.name
-  charset             = "utf8mb4"
-  collation           = "utf8mb4_unicode_ci"
-}
-
+# Network security group with different priorities
 resource "azurerm_network_security_group" "webapp_nsg" {
   name                = "webapp-nsg"
   location            = var.location

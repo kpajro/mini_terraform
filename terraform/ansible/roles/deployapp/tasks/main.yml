@@ -10,20 +10,20 @@
 
 - name: Cloner l'application depuis Git
   git:
-    repo: 'https://github.com/kpajro/chat_app.git'
-    dest: ~/project/chatapp
+    repo: 'https://github.com/kpajro/deploy_app.git'
+    dest: deployapp
     version: main
     force: yes
 
 - name: Installer les dépendances NPM
   npm:
-    path: ~/project/chatapp
+    path: deployapp
     production: yes
 
-- name: Lancer l'app avec PM2
-  command: pm2 start index.js --name chatapp
-  args:
-    chdir: ~/project/chatapp
+- name: Start the app with PM2 as azureuser
+  become: true
+  become_user: azureuser
+  command: pm2 -f start /home/azureuser/deployapp/server.js
 
 - name: Générer la commande de démarrage auto
   command: pm2 startup systemd
