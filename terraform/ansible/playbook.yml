@@ -1,0 +1,5 @@
+- name : Déploiement Node.js via Git
+  hosts : chat-vm
+  become : yes
+  roles:
+    - chatapp

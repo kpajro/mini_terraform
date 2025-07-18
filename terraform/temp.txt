@@ -1,0 +1,5 @@
+"rm -rf deploy_app || true",
+"git clone https://github.com/kpajro/chat_app.git",
+"cd deploy_app",
+"npm install",
+"node server.js"

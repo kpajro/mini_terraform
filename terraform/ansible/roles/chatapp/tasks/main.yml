@@ -1,0 +1,33 @@
+- name: Installer les dépendances de base
+  apt:
+    name: [git, nodejs, npm]
+    update_cache: yes
+
+- name: Installer PM2 globalement
+  npm:
+    name: pm2
+    global: yes
+
+- name: Cloner l'application depuis Git
+  git:
+    repo: 'https://github.com/kpajro/chat_app.git'
+    dest: ~/project/chatapp
+    version: main
+    force: yes
+
+- name: Installer les dépendances NPM
+  npm:
+    path: ~/project/chatapp
+    production: yes
+
+- name: Lancer l'app avec PM2
+  command: pm2 start index.js --name chatapp
+  args:
+    chdir: ~/project/chatapp
+
+- name: Générer la commande de démarrage auto
+  command: pm2 startup systemd
+  register: pm2_startup
+
+- name: Sauvegarder l'état PM2
+  command: pm2 save
